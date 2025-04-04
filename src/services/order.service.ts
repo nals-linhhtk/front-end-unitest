@@ -1,11 +1,28 @@
 import { Order } from '../models/order.model';
 import { PaymentService } from './payment.service';
 
-
 export class OrderService {
-  constructor(private readonly paymentService: PaymentService) {}
+  private readonly couponApiUrl = 'https://67eb7353aa794fb3222a4c0e.mockapi.io/coupons';
+  private readonly orderApiUrl = 'https://67eb7353aa794fb3222a4c0e.mockapi.io/order';
+
+  constructor(private readonly paymentService: PaymentService) { }
 
   async process(order: Partial<Order>) {
+    this.validateOrder(order);
+
+    let totalPrice = this.calculateInitialTotal(order);
+
+    if (order.couponId) {
+      totalPrice = await this.applyCoupon(totalPrice, order.couponId);
+    }
+
+    const orderPayload = this.buildOrderPayload(order, totalPrice);
+    const createdOrder = await this.submitOrder(orderPayload);
+
+    this.paymentService.payViaLink(createdOrder);
+  }
+
+  private validateOrder(order: Partial<Order>): void {
     if (!order.items?.length) {
       throw new Error('Order items are required');
     }
@@ -13,42 +30,49 @@ export class OrderService {
     if (order.items.some(item => item.price <= 0 || item.quantity <= 0)) {
       throw new Error('Order items are invalid');
     }
+  }
 
-    let totalPrice = order.items.reduce((acc, item) => acc + item.price * item.quantity, 0);
+  private calculateInitialTotal(order: Partial<Order>): number {
+    const totalPrice = order.items?.reduce((acc, item) => acc + item.price * item.quantity, 0) || 0;
 
     if (totalPrice <= 0) {
       throw new Error('Total price must be greater than 0');
     }
 
-    if (order.couponId) {
-      const response = await fetch(`https://67eb7353aa794fb3222a4c0e.mockapi.io/coupons/${order.couponId}`)
-      const coupon = await response.json();
+    return totalPrice;
+  }
 
-      if (!coupon) {
-        throw new Error('Invalid coupon');
-      }
+  private async applyCoupon(totalPrice: number, couponId: string): Promise<number> {
+    const coupon = await this.fetchCoupon(couponId);
 
-      totalPrice -= coupon.discount;
-
-      if (totalPrice < 0) {
-        totalPrice = 0;
-      }
+    if (!coupon) {
+      throw new Error('Invalid coupon');
     }
 
-    const orderPayload = {
+    let discountedPrice = totalPrice - coupon.discount;
+    return discountedPrice < 0 ? 0 : discountedPrice;
+  }
+
+  private async fetchCoupon(couponId: string) {
+    const response = await fetch(`${this.couponApiUrl}/${couponId}`);
+    return await response.json();
+  }
+
+  private buildOrderPayload(order: Partial<Order>, totalPrice: number) {
+    return {
       ...order,
       totalPrice,
       paymentMethod: this.paymentService.buildPaymentMethod(totalPrice),
-    }
+    };
+  }
 
-    const orderResponse = await fetch('https://67eb7353aa794fb3222a4c0e.mockapi.io/order', {
+  private async submitOrder(orderPayload: any) {
+    const orderResponse = await fetch(this.orderApiUrl, {
       method: 'POST',
       body: JSON.stringify(orderPayload),
       headers: { 'Content-Type': 'application/json' }
     });
 
-    const createdOrder = await orderResponse.json();
-
-    this.paymentService.payViaLink(createdOrder);
+    return await orderResponse.json();
   }
 }
